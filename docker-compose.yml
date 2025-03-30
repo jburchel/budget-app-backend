@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:14
+    container_name: budget-app-postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: budget_app
+    networks:
+      - budget-app-network
+
+  # Uncomment this to add pgAdmin for database management
+  # pgadmin:
+  #   image: dpage/pgadmin4
+  #   container_name: budget-app-pgadmin
+  #   ports:
+  #     - "5050:80"
+  #   environment:
+  #     PGADMIN_DEFAULT_EMAIL: admin@example.com
+  #     PGADMIN_DEFAULT_PASSWORD: admin
+  #   networks:
+  #     - budget-app-network
+  #   depends_on:
+  #     - postgres
+
+networks:
+  budget-app-network:
+    driver: bridge
+
+volumes:
+  postgres_data: 

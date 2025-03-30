@@ -1,0 +1,260 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id             String   @id @default(uuid())
+  email          String   @unique
+  password       String
+  firstName      String?
+  lastName       String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  isEmailVerified Boolean  @default(false)
+  resetToken     String?
+  resetTokenExp  DateTime?
+  budgets        Budget[]
+  plaidItems     PlaidItem[]
+
+  // MFA Fields
+  mfaSecret      String?  // Encrypted TOTP secret
+  isMfaEnabled   Boolean  @default(false)
+
+  // Subscription Fields
+  stripeCustomerId    String?  @unique // Stripe Customer ID
+  subscriptionId      String?  @unique // Stripe Subscription ID
+  subscriptionStatus  String?  // e.g., active, trialing, past_due, canceled
+  planId              String?  // Identifier for the subscribed plan
+  trialEndDate        DateTime? // End date of the free trial, if applicable
+
+  @@index([isMfaEnabled]) 
+  @@index([stripeCustomerId]) // Index for webhook lookups
+  @@index([subscriptionId]) // Index for webhook lookups
+}
+
+model Budget {
+  id             String   @id @default(uuid())
+  name           String
+  description    String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  userId         String
+  user           User     @relation(fields: [userId], references: [id])
+  categoryGroups CategoryGroup[]
+  accounts       Account[]
+  payees         Payee[]
+  transactions   Transaction[]
+}
+
+// Represents a group of categories (e.g., "Everyday Expenses", "Savings Goals")
+model CategoryGroup {
+  id        String     @id @default(uuid())
+  name      String
+  sortOrder Int?       // Optional sort order within the budget
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+  budgetId  String
+  budget    Budget     @relation(fields: [budgetId], references: [id])
+  categories Category[]
+}
+
+// Represents a specific budget category (e.g., "Groceries", "Rent")
+model Category {
+  id               String     @id @default(uuid())
+  name             String
+  sortOrder        Int?       // Optional sort order within the group
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+  categoryGroupId  String
+  categoryGroup    CategoryGroup @relation(fields: [categoryGroupId], references: [id])
+  budgetEntries    BudgetEntry[]
+  transactions     Transaction[]
+  splitTransactions SplitTransaction[]
+  goal             Goal?       // Add the one-to-one relation back to Category
+
+  // Link back from payment category to the Credit Card Account
+  creditCardAccount Account? @relation("CreditCardPaymentCategory")
+}
+
+// Represents the budgeted amount for a category in a specific month
+model BudgetEntry {
+  id            String   @id @default(uuid())
+  year          Int      // e.g., 2024
+  month         Int      // e.g., 1 for January, 12 for December
+  assignedAmount Decimal  @default(0) // Amount budgeted/assigned for this month
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  categoryId    String
+  category      Category @relation(fields: [categoryId], references: [id])
+
+  @@unique([categoryId, year, month]) // Ensure only one entry per category per month
+}
+
+// Enum for Account Types
+enum AccountType {
+  CHECKING
+  SAVINGS
+  CREDIT_CARD
+  CASH
+  LINE_OF_CREDIT
+  INVESTMENT // Typically Tracking
+  MORTGAGE // Typically Tracking
+  OTHER_ASSET // Typically Tracking (e.g., Property)
+  OTHER_LIABILITY // Typically Tracking (e.g., Student Loan)
+}
+
+// Represents a financial account (Checking, Savings, Credit Card, etc.)
+model Account {
+  id             String      @id @default(uuid())
+  name           String
+  type           AccountType
+  onBudget       Boolean     // True for budget accounts (affect budget), False for tracking accounts
+  balance        Decimal     @default(0) // Current calculated balance (might be denormalized)
+  clearedBalance Decimal     @default(0) // Balance of only cleared transactions
+  unclearedBalance Decimal   @default(0) // Balance of uncleared transactions
+  officialName   String?     // Name from the financial institution
+  note           String?
+  isClosed       Boolean     @default(false)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+  budgetId       String
+  budget         Budget      @relation(fields: [budgetId], references: [id])
+  transactions   Transaction[]
+
+  // Plaid Linking
+  plaidItemId     String?      // Link to the PlaidItem this account belongs to
+  plaidItem       PlaidItem?   @relation(fields: [plaidItemId], references: [id])
+  plaidAccountId  String?      @unique // The actual account_id from Plaid
+
+  // Link to dedicated payment category for Credit Cards
+  paymentCategoryId String?    @unique // Optional, but should be unique if set
+  paymentCategory   Category?  @relation("CreditCardPaymentCategory", fields: [paymentCategoryId], references: [id])
+}
+
+// Represents a linked financial institution via Plaid
+model PlaidItem {
+  id            String    @id @default(uuid())
+  userId        String
+  user          User      @relation(fields: [userId], references: [id])
+  accessToken   String    // Encrypted Plaid access token
+  itemId        String    @unique // Plaid item ID
+  institutionId String?   // Plaid institution ID
+  institutionName String? // Name of the institution
+  lastSync      DateTime? // Timestamp of the last successful transaction sync
+  syncCursor    String?   // Cursor for fetching incremental transaction updates
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  accounts      Account[] // Accounts linked via this item
+
+  @@index([userId])
+}
+
+// Represents a Payee (Person, Place, or Company for transactions)
+model Payee {
+  id        String      @id @default(uuid())
+  name      String
+  budgetId  String      // Payees are budget-specific
+  budget    Budget      @relation(fields: [budgetId], references: [id])
+  transactions Transaction[]
+
+  @@unique([budgetId, name]) // Unique payee name per budget
+}
+
+// Enum for Transaction Clearing Status
+enum ClearedStatus {
+  CLEARED
+  UNCLEARED
+  RECONCILED // Locked via reconciliation
+}
+
+// Enum for Transaction Type (simplification)
+enum TransactionType {
+  INFLOW
+  OUTFLOW
+  TRANSFER
+}
+
+// Represents a single financial transaction
+model Transaction {
+  id              String        @id @default(uuid())
+  date            DateTime      // Date the transaction occurred
+  amount          Decimal       // Positive for inflow/transfer target, Negative for outflow/transfer source
+  memo            String?
+  cleared         ClearedStatus @default(UNCLEARED)
+  approved        Boolean       @default(false) // Has the user reviewed/approved this transaction (esp. for imported)
+  isTransfer      Boolean       @default(false)
+  transferAccountId String?       // If isTransfer=true, the ID of the OTHER account in the transfer
+  transferGroupId String?       // Links the two transactions of a transfer pair
+  isSplit         Boolean       @default(false) // If true, details are in SplitTransaction
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  accountId       String
+  account         Account       @relation(fields: [accountId], references: [id])
+  payeeId         String?       // Can be null for transfers
+  payee           Payee?        @relation(fields: [payeeId], references: [id])
+  categoryId      String?       // Can be null for transfers or uncategorized TBB inflows
+  category        Category?     @relation(fields: [categoryId], references: [id])
+  budgetId        String
+  budget          Budget        @relation(fields: [budgetId], references: [id])
+
+  plaidTransactionId String?   @unique // transaction_id from Plaid, if imported
+
+  // For transfers (Self-relation - remove direct relation to Account model for transfer target)
+  // transferAccount   Account? @relation("TransferTo", fields: [transferAccountId], references: [id])
+  // originatingAccount Account? @relation("TransferFrom", fields: [accountId], references: [id])
+  // Instead, use transferGroupId to find the pair
+
+  splitTransactions SplitTransaction[]
+
+  @@index([transferGroupId]) // Index for finding transfer pairs
+}
+
+// Represents a single split within a split transaction
+model SplitTransaction {
+  id           String   @id @default(uuid())
+  amount       Decimal  // Amount for this specific split (positive or negative)
+  memo         String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  transactionId String
+  transaction   Transaction @relation(fields: [transactionId], references: [id])
+  categoryId   String   // Each split MUST have a category
+  category     Category @relation(fields: [categoryId], references: [id])
+}
+
+// --- Goals --- //
+
+enum GoalType {
+  TARGET_BALANCE // Save X amount (no date)
+  TARGET_BALANCE_BY_DATE // Save X amount by Y date
+  MONTHLY_FUNDING // Budget X amount each month
+  // Add others like Debt Paydown later?
+}
+
+model Goal {
+  id          String    @id @default(uuid())
+  name        String?   // Optional name for the goal
+  type        GoalType
+  targetAmount Decimal?  // Required for TARGET_BALANCE types
+  targetDate  DateTime? // Required for TARGET_BALANCE_BY_DATE
+  monthlyFundingAmount Decimal? // Required for MONTHLY_FUNDING
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  categoryId  String    @unique // A goal belongs to exactly one category
+  category    Category  @relation(fields: [categoryId], references: [id])
+}
